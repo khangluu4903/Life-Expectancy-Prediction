@@ -1,0 +1,199 @@
+---
+title: 'Life Lines: A Predictive Model for Life Expectancy'
+author: "Khang Luu"
+date: "2024-03-12"
+output: pdf_document
+---
+# Part 1: Importing the Data
+
+```{r}
+# importing data files and loading libraries
+df <- read.csv("life_expectancy.csv")
+library(car)
+library(corrplot)
+```
+
+```{r}
+# Examine the first 6 rows
+head(df)
+```
+```{r} 
+# remove NAs 
+df <- na.omit(df)
+# drop columns/variables that the author did not want to work with due to time constraint
+df <- df[, -c(1,2,3,6,8,9,10,12,13,14,15,16,19,20,21)]
+colnames(df)[1] <- "life_expectancy"  
+colnames(df)[2] <- "adult_mortality"
+colnames(df)[3] <- "alcohol"
+colnames(df)[5] <- "GDP"
+colnames(df)[6] <- "population"
+colnames(df)[7] <- "schooling"
+```
+
+# Part 2: Data Exploration and Model Fitting
+
+```{r}
+# checking for multiple collinearity
+corr <- cor(df)
+suppressWarnings(
+  corrplot(corr, tl.cex = 0.5, cl.cex = 0.5)
+)
+```
+
+```{r}
+# model fitting
+model <- lm(life_expectancy ~ adult_mortality + alcohol + BMI + GDP
+            + population + schooling, data = df)
+summary(model)
+```
+
+```{r}
+par(mfrow=c(2,2))
+plot(model)
+```
+
+From the diagnostic tools, we observe:
+1. The relationship between the predictors and life expectancy is not linear since the red line is not straight between the fitted values and residuals. 
+2. The error term does not follow normality because the points are not aligning to the straight line with slope 1. 3. The plot of the squared root of standardized residual vs. fitted Y does not show any apparent pattern, suggesting a constant variance. 
+
+```{r}
+pairs(df, gap = 0.4, cex.labels = 0.75)
+```
+The scatter plot shows skewed distribution and non-constant variances. This means a transformation is needed.
+
+```{r}
+suppressWarnings(
+  summary(tranxy <- powerTransform(cbind(df$life_expectancy, df$adult_mortality, df$alcohol, df$BMI, df$GDP, df$population, df$schooling)))
+  )
+# near 0, log it. greater than 1, make it a power 
+```
+
+
+```{r}
+# scatter plot matrix for the log-transformed data
+# we now consider a MLR model based on log-transformed data
+df$t_life_expect <- ((df$life_expectancy)^2.87 - 1) / 2.87
+df$t_mortality <- ((df$adult_mortality)^0.64 - 1) / 0.64
+df$t_BMI <- ((df$BMI)^1.10 - 1) / 1.10
+df$t_alcohol <- ((df$alcohol)^0.44 - 1) / 0.44
+df$log_GDP <- log(df$GDP)
+df$log_pop <- log(df$population)
+df$t_schooling <- ((df$schooling)^1.33 - 1) / 1.33
+pairs(t_life_expect ~ t_mortality + t_alcohol + t_BMI + log_GDP + log_pop + t_schooling, data = df, gap = 0.4, cex.labels = 0.9)
+```
+
+
+```{r}
+t_model <-  lm(t_life_expect ~ t_mortality + t_alcohol + t_BMI + log_GDP + log_pop + t_schooling, data = df)
+plot(t_model)
+summary(t_model)
+```
+The overall F-test for the model is statistically significant with a p-value less than 2.2e-16. However, t_alcohol and log_pop are statistically insignificant.  
+
+
+# Variable Selection
+
+```{r}
+library(car)
+vif(t_model)
+```
+Because all predictors have VIFs less than 5, this implies that there is no multicollinearity between predictors.
+
+```{r}
+# Added variable plots
+par(mfrow = c(2,3))
+avPlot(t_model, variable = "t_mortality", ask = FALSE)
+avPlot(t_model, variable = "t_alcohol", ask = FALSE)
+avPlot(t_model, variable = "t_BMI", ask = FALSE)
+avPlot(t_model, variable = "log_GDP", ask = FALSE)
+avPlot(t_model, variable = "log_pop", ask = FALSE)
+avPlot(t_model, variable = "t_schooling", ask = FALSE)
+
+```
+The added-variable plots show that log(BMI), log(alcohol), and log(population) does not have a linear relationship with life_expectancy. I will explore model selection to improve the model. 
+
+## Method 1: Subset Model
+```{r}
+library(leaps)
+X <- cbind(df$t_mortality, df$t_alcohol, df$t_BMI, df$log_GDP, df$log_pop, df$t_schooling)
+b <- regsubsets(as.matrix(X),df$t_life_expect)
+summary(b)
+```
+
+
+```{r}
+predictors_list <- list(
+  c("t_schooling"),
+  c("t_mortality", "t_schooling"),
+  c("t_mortality", "log_GDP", "t_schooling"),
+  c("t_mortality", "t_BMI", "log_GDP", "t_schooling"),
+  c("t_mortality","t_BMI", "log_GDP", "log_pop", "t_schooling"),
+  c("t_mortality", "t_alcohol", "t_BMI", "log_GDP", "log_pop","t_schooling")
+)
+
+# Initialize vectors to store results
+R2_values <- numeric(6)
+AIC_values <- numeric(6)
+AICc_values <- numeric(6)
+BIC_values <- numeric(6)
+
+# Iterate over each value of p
+for (p in 1:6) {
+  # Get the predictors for the current p
+  predictors <- predictors_list[[p]]
+  
+  # Fit the model and calculate R-squared, AIC, and BIC
+  formula <- as.formula(paste("t_life_expect ~ ", paste(predictors, collapse = " + ")))
+  model <- lm(formula, data = df)
+  R2_values[p] <- summary(model)$adj.r.squared
+  AIC_values[p] <- AIC(model)
+  AICc_values[p] <- extractAIC(model)[2] + 2*(p+2)*(p+3)/(nrow(df)-p-1)
+  BIC_values[p] <- BIC(model)
+}
+
+# Create a dataframe to store the results
+results_df <- data.frame(
+  Size = 1:6,
+  Radj2 = R2_values,
+  AIC = AIC_values,
+  AICc = AICc_values,
+  BIC = BIC_values
+)
+
+# Print the results
+print(results_df)
+
+```
+
+Using the R^2 value, the subset p = 5 model is recommended. Using AIC-corrected and BIC value, the subset p = 4 model is recommended. I will now analyze both models further to pick the best one. 
+
+```{r}
+p4 <- c("t_mortality", "t_BMI", "log_GDP", "t_schooling")
+formula <- as.formula(paste("t_life_expect ~ ", paste(p4, collapse = " + ")))
+subset_4 <- lm(formula, data = df)
+summary(subset_4)
+
+# Fit linear regression model with 7 predictors
+p5 <-   c("t_mortality","t_BMI", "log_GDP", "log_pop", "t_schooling")
+formula <- as.formula(paste("t_life_expect ~ ", paste(p5, collapse = " + ")))
+subset_5 <- lm(formula, data = df)
+summary(subset_5)
+```
+
+Both models are statistically significant when examining the p-value of the F-statistic. In the p = 4 subset model, the R^2 value is smaller but all the predictors are statistically significant. In the p = 5 model, the R^2 values are higher but log_pop is not significant, indicating that the five-variables model overfits the data. Based upon this information, I would elect to go with four-variables subset.
+
+## Verification with Backward Regression
+```{r, fig.keep="next", echo = FALSE}
+library(leaps)
+backward <- step(t_model, direction = "backward")
+backward$coefficients
+```
+Stepwise regression backward stepwise also supports that the four-variables model with predictors t_BMI, log_GDP, t_mortality, and t_schooling, is the best model.
+
+# Interpretation
+
+```{r, fig.keep="next", echo = FALSE}
+final_model <- lm(t_life_expect ~ t_mortality + t_BMI + log_GDP + t_schooling, data = df)
+summary(final_model)
+```
+With an R^2 value of 0.7105, the four predictors, t_mortality, t_BMI, log_GDP, and t_schooling can explain 71.05% of the variation in life expectancy. Furthermore, all four predictors are statistically significant with p-values less than alpha 0.05. Lastly, the F-statistic also has a p-value less than 2.2e-16, revealing the strength of the model. 
